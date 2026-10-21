@@ -89,7 +89,7 @@ public class SHAnchors extends JavaPlugin {
                 if (!nearbyPlayers.isEmpty()) {
                     Location particleLoc = loc.clone().add(0.5, 1.2, 0.5);
                     Particle.DustOptions dustOptions = anchor.isIslandOnly() ? PARTICLE_ISLAND_ONLY : PARTICLE_PUBLIC;
-                    world.spawnParticle(Particle.REDSTONE, particleLoc, 1, 0, 0, 0, 0, dustOptions);
+                    world.spawnParticle(Particle.DUST, particleLoc, 1, 0, 0, 0, 0, dustOptions);
                 }
             }
         }, 0L, 20L);
@@ -166,7 +166,7 @@ public class SHAnchors extends JavaPlugin {
             List<String> lore = config.getStringList("anchor.lore");
             lore = lore.stream().map(line -> ChatColor.translateAlternateColorCodes('&', line)).collect(Collectors.toList());
             meta.setLore(lore);
-            meta.addEnchant(Enchantment.DURABILITY, 1, true);
+            meta.addEnchant(Enchantment.UNBREAKING, 1, true);
             meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
             item.setItemMeta(meta);
         }
@@ -176,7 +176,7 @@ public class SHAnchors extends JavaPlugin {
     public boolean isAnchorItem(ItemStack item) {
         if (item == null || item.getType() != Material.RESPAWN_ANCHOR) return false;
         ItemMeta meta = item.getItemMeta();
-        return meta != null && meta.hasEnchant(Enchantment.DURABILITY) && meta.hasLore();
+        return meta != null && meta.hasEnchant(Enchantment.UNBREAKING) && meta.hasLore();
     }
 
     public void openAnchorGui(Player player, TeleportAnchor anchor) {
