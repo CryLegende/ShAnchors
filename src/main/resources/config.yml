@@ -1,0 +1,136 @@
+# Configuration de l'item Ancre de Téléportation
+anchor:
+  name: "&5Ancre de Téléportation"
+  lore:
+    - "&7Placez cette ancre et liez-la"
+    - "&7à une autre pour créer un"
+    - "&7point de &5téléportation&7."
+    - ""
+    - "&7&o(( &5Accroupissez-vous sur l'ancre"
+    - "&5pour vous &5téléporter ! &7&o))"
+
+# Messages du plugin
+messages:
+  player-only: "&7&l« &c&lSH &8&l» &7Cette commande ne peut être utilisée que par un joueur."
+  no-permission: "&7&l« &c&lSH &8&l» &7Vous n'avez pas la permission d'utiliser cette commande."
+  invalid-args: "&7&l« &c&lSH &8&l» &7Utilisation: /shanchors give <joueur> [quantité]"
+  specify-player: "&7&l« &c&lSH &8&l» &7Veuillez spécifier un joueur."
+  player-not-found: "&7&l« &c&lSH &8&l» &7Joueur introuvable."
+  invalid-amount: "&7&l« &c&lSH &8&l» &7Quantité invalide."
+  anchor-given: "&7&l« &a&lSH &8&l» &7Vous avez donné &e%amount% &7ancre(s) à &e%player%&7."
+  anchor-placed: "&7&l« &a&lSH &8&l» &7Ancre placée! Clic-droit pour la configurer."
+  anchor-broken: "&7&l« &c&lSH &8&l» &7Ancre détruite."
+  anchor-linked: "&7&l« &a&lSH &8&l» &7Ancre liée avec succès!"
+  anchor-unlinked: "&7&l« &c&lSH &8&l» &7Liaison d'ancre supprimée."
+  already-linked: "&7&l« &c&lSH &8&l» &7Cette ancre est déjà liée."
+  no-anchor-selected: "&7&l« &c&lSH &8&l» &7Vous devez d'abord sélectionner une ancre à lier."
+  cant-link-same: "&7&l« &c&lSH &8&l» &7Vous ne pouvez pas lier une ancre à elle-même."
+  teleported: "&7&l« &a&lSH &8&l» &7Vous avez été téléporté!"
+  link-start: "&7&l« &a&lSH &8&l» &7Cliquez sur l'autre ancre pour établir la connexion."
+  # --- MODIFIÉ ---
+  not-on-island: "&7&l« &c&lSH &8&l» &7Vous ne pouvez placer des ancres que sur votre île."
+  cannot-use-restricted-anchor: "&7&l« &c&lSH &8&l» &7Cette ancre est restreinte aux membres de l'île."
+  anchor-access-changed: "&7&l« &a&lSH &8&l» &7Accès à l'ancre changé en: &e%status%"
+  status-public: "Tout le monde"
+  status-island: "Membres de l'île"
+
+# Configuration du menu (GUI)
+gui:
+  title: "&8Gestion de l'ancre"
+  filler-item:
+    material: "GRAY_STAINED_GLASS_PANE"
+    name: " "
+  linked-anchor-item:
+    material: "ENDER_EYE"
+    name: "&eAncre Liée"
+    lore:
+      - ""
+      - "&8&l« &7Cette ancre est liée à une"
+      - "&7autre ancre. Accroupissez-vous"
+      - "&7sur l'ancre pour vous &5téléporter &8&l»"
+      - ""
+      - "&fCoordonnées: &e%x%x %y%y %z%z"
+      - ""
+  link-item:
+    material: "ENDER_PEARL"
+    name: "&5Lier cette ancre"
+    lore:
+      - ""
+      - "&8&l« &7Liez cette ancre à une autre"
+      - "&7pour créer un point de &5téléportation &8&l»"
+      - ""
+      - "&7&o(( &5&oCliquez pour démarrer la liaison &7&o))"
+  unlink-item:
+    material: "BARRIER"
+    name: "&cSupprimer la liaison"
+    lore:
+      - ""
+      - "&7&o(( &c&oCliquez pour supprimer la liaison &7&o))"
+  access-public-item:
+    material: "PLAYER_HEAD"
+    name: "&aRendre Publique"
+    lore:
+      - ""
+      - "&8&l« &7Autoriser tous les joueurs"
+      - "&7à utiliser cette ancre &8&l»"
+      - ""
+      - "&fStatut actuel: &cMembres de l'île"
+      - ""
+      - "&7&o(( &a&oCliquez pour changer &7&o))"
+  access-island-item:
+    material: "IRON_DOOR"
+    name: "&cRestreindre aux Membres"
+    lore:
+      - ""
+      - "&8&l« &7Autoriser uniquement les membres"
+      - "&7de votre île à utiliser cette ancre &8&l»"
+      - ""
+      - "&fStatut actuel: &aPublique"
+      - ""
+      - "&7&o(( &c&oCliquez pour changer &7&o))"
+  orientation-item:
+    material: "COMPASS"
+    name: "&eOrientation de téléportation"
+    lore:
+      - ""
+      - "&8&l« &7Changer la direction dans"
+      - "&7laquelle le joueur regardera en"
+      - "&7se téléportant à cette ancre &8&l»"
+      - ""
+      - "&fOrientation: &e%orientation%"
+      - ""
+      - "&7&o(( &e&oCliquez pour changer &7&o))"
+    states:
+      DEFAULT: "Défaut (Direction du joueur)"
+      NORTH: "Nord"
+      SOUTH: "Sud"
+      EAST: "Est"
+      WEST: "Ouest"
+  slots:
+    linked: 13
+    link: 13
+    access: 11
+    orientation: 15
+
+# Options de téléportation
+teleport:
+  delay-ms: 500
+
+# Sons du plugin
+sounds:
+  link-performed:
+    sound: "ENTITY_EXPERIENCE_ORB_PICKUP"
+    volume: 1.0
+    pitch: 1.2
+  link-expired:
+    sound: "ENTITY_ITEM_BREAK"
+    volume: 1.0
+    pitch: 1.0
+  link-deleted:
+    sound: "BLOCK_ANVIL_LAND"
+    volume: 1.0
+    pitch: 0.8
+  toggle-access:
+    sound: "UI_BUTTON_CLICK"
+    volume: 0.8
+    pitch: 1.5
