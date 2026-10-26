@@ -21,17 +21,28 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerToggleSneakEvent;
+import org.bukkit.event.world.WorldLoadEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.util.NumberConversions;
+import org.yaml.snakeyaml.LoaderOptions;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.Reader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -42,7 +53,11 @@ public class SHAnchors extends JavaPlugin {
     private final Map<UUID, UUID> linkedAnchors = new HashMap<>();
     private final Map<UUID, UUID> anchorSelectionMode = new HashMap<>();
     private final Map<UUID, Long> teleportCooldown = new HashMap<>();
-    private final Map<Chunk, Set<UUID>> anchorsByChunk = new HashMap<>();
+    private final Map<ChunkKey, Set<UUID>> anchorsByChunk = new HashMap<>();
+    // Entrées d'anchors.yml gardées telles quelles : monde pas encore chargé (PhantomWorlds) ou entrée illisible
+    private final Map<String, Object> pendingAnchors = new LinkedHashMap<>();
+    // Faux si anchors.yml existe mais n'a pas pu être lu : on ne le réécrit pas
+    private boolean anchorsLoaded = true;
 
     private static final Particle.DustOptions PARTICLE_PUBLIC = new Particle.DustOptions(Color.PURPLE, 1.0f);
     private static final Particle.DustOptions PARTICLE_ISLAND_ONLY = new Particle.DustOptions(Color.RED, 1.0f);
@@ -69,7 +84,7 @@ public class SHAnchors extends JavaPlugin {
         Objects.requireNonNull(getCommand("shanchors")).setExecutor(new AnchorCommand(this));
 
         loadAnchors();
-        cleanupInvalidAnchors();
+        cleanupOrphanedAnchorsLightweight();
 
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             for (TeleportAnchor anchor : new ArrayList<>(anchors.values())) {
@@ -81,12 +96,7 @@ public class SHAnchors extends JavaPlugin {
                 if (!linkedAnchors.containsKey(anchor.getId())) continue;
                 if (loc.getBlock().getType() != Material.RESPAWN_ANCHOR) continue;
 
-                Collection<Player> nearbyPlayers = world.getNearbyEntities(loc, 16, 16, 16, entity -> entity instanceof Player)
-                    .stream()
-                    .map(entity -> (Player) entity)
-                    .collect(Collectors.toList());
-
-                if (!nearbyPlayers.isEmpty()) {
+                if (!world.getNearbyPlayers(loc, 16, 16, 16).isEmpty()) {
                     Location particleLoc = loc.clone().add(0.5, 1.2, 0.5);
                     Particle.DustOptions dustOptions = anchor.isIslandOnly() ? PARTICLE_ISLAND_ONLY : PARTICLE_PUBLIC;
                     world.spawnParticle(Particle.DUST, particleLoc, 1, 0, 0, 0, 0, dustOptions);
@@ -95,7 +105,11 @@ public class SHAnchors extends JavaPlugin {
         }, 0L, 20L);
 
         long cleanupIntervalTicks = 20L * 60 * 30;
-        Bukkit.getScheduler().runTaskTimer(this, this::cleanupOrphanedAnchorsLightweight, cleanupIntervalTicks, cleanupIntervalTicks);
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            cleanupOrphanedAnchorsLightweight();
+            // Sauvegarde régulière : un arrêt brutal du serveur ne perd plus les ancres posées depuis le démarrage
+            saveAnchors();
+        }, cleanupIntervalTicks, cleanupIntervalTicks);
     }
 
     @Override
@@ -132,7 +146,7 @@ public class SHAnchors extends JavaPlugin {
         return teleportCooldown;
     }
 
-    public Map<Chunk, Set<UUID>> getAnchorsByChunk() {
+    public Map<ChunkKey, Set<UUID>> getAnchorsByChunk() {
         return anchorsByChunk;
     }
 
@@ -145,17 +159,22 @@ public class SHAnchors extends JavaPlugin {
     }
 
     public void addAnchorToChunkMap(TeleportAnchor anchor) {
-        anchorsByChunk.computeIfAbsent(anchor.getLocation().getChunk(), k -> new HashSet<>()).add(anchor.getId());
+        anchorsByChunk.computeIfAbsent(ChunkKey.of(anchor.getLocation()), k -> new HashSet<>()).add(anchor.getId());
     }
 
     public void removeAnchorFromChunkMap(TeleportAnchor anchor) {
-        Set<UUID> chunkAnchors = anchorsByChunk.get(anchor.getLocation().getChunk());
+        ChunkKey chunk = ChunkKey.of(anchor.getLocation());
+        Set<UUID> chunkAnchors = anchorsByChunk.get(chunk);
         if (chunkAnchors != null) {
             chunkAnchors.remove(anchor.getId());
             if (chunkAnchors.isEmpty()) {
-                anchorsByChunk.remove(anchor.getLocation().getChunk());
+                anchorsByChunk.remove(chunk);
             }
         }
+    }
+
+    public boolean isPendingAnchor(UUID id) {
+        return pendingAnchors.containsKey(id.toString());
     }
 
     public ItemStack createAnchorItem(int amount) {
@@ -253,8 +272,7 @@ public class SHAnchors extends JavaPlugin {
     }
 
     public TeleportAnchor getAnchorAt(Location location) {
-        Chunk chunk = location.getChunk();
-        Set<UUID> chunkAnchors = anchorsByChunk.get(chunk);
+        Set<UUID> chunkAnchors = anchorsByChunk.get(ChunkKey.of(location));
         if (chunkAnchors == null) return null;
 
         for (UUID anchorId : chunkAnchors) {
@@ -279,35 +297,100 @@ public class SHAnchors extends JavaPlugin {
         }
     }
 
+    private enum Resolution {OK, WORLD_MISSING, INVALID}
+
+    /**
+     * Lecture brute d'anchors.yml (sans désérialiser les Location) : un emplacement dont le monde n'est pas
+     * encore chargé est gardé en attente et réécrit tel quel, au lieu d'être perdu à la sauvegarde suivante.
+     */
     private void loadAnchors() {
         File file = new File(getDataFolder(), "anchors.yml");
         if (!file.exists()) return;
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
-        for (String key : yaml.getKeys(false)) {
-            ConfigurationSection section = yaml.getConfigurationSection(key);
-            if (section == null) continue;
-            try {
-                UUID id = UUID.fromString(key);
-                Location loc = section.getLocation("location");
-                boolean islandOnly = section.getBoolean("islandOnly", false);
-                String orientStr = section.getString("orientation", "DEFAULT");
-                AnchorOrientation orientation = AnchorOrientation.valueOf(orientStr);
-                if (loc != null) {
-                    TeleportAnchor anchor = new TeleportAnchor(id, loc, islandOnly, orientation);
-                    anchors.put(id, anchor);
-                    addAnchorToChunkMap(anchor);
-                    String linkedIdStr = section.getString("linked");
-                    if (linkedIdStr != null) {
-                        linkedAnchors.put(id, UUID.fromString(linkedIdStr));
-                    }
-                }
-            } catch (Exception e) {
-                getLogger().warning("Erreur lors du chargement de l'ancre " + key + ": " + e.getMessage());
+        Object parsed;
+        try (Reader reader = Files.newBufferedReader(file.toPath(), StandardCharsets.UTF_8)) {
+            parsed = new Yaml(new SafeConstructor(new LoaderOptions())).load(reader);
+        } catch (IOException | RuntimeException e) {
+            anchorsLoaded = false;
+            getLogger().severe("anchors.yml illisible, les ancres ne seront pas sauvegardées pour ne pas l'écraser : " + e.getMessage());
+            return;
+        }
+        if (!(parsed instanceof Map<?, ?> root)) return;
+        for (Map.Entry<?, ?> entry : root.entrySet()) {
+            String key = String.valueOf(entry.getKey());
+            Resolution result = resolveAnchor(key, entry.getValue());
+            if (result == Resolution.OK) continue;
+            pendingAnchors.put(key, entry.getValue());
+            if (result == Resolution.INVALID) {
+                getLogger().warning("Ancre " + key + " illisible : entrée conservée telle quelle dans anchors.yml.");
             }
+        }
+        if (!pendingAnchors.isEmpty()) {
+            getLogger().info(pendingAnchors.size() + " ancre(s) en attente (monde pas encore chargé ou entrée illisible).");
+        }
+    }
+
+    private static World worldOf(Map<?, ?> location) {
+        Object worldKey = location.get("world_key");
+        if (worldKey != null) {
+            NamespacedKey namespaced = NamespacedKey.fromString(String.valueOf(worldKey));
+            return namespaced == null ? null : Bukkit.getWorld(namespaced);
+        }
+        Object name = location.get("world");
+        return name == null ? null : Bukkit.getWorld(String.valueOf(name));
+    }
+
+    private Resolution resolveAnchor(String key, Object rawEntry) {
+        try {
+            UUID id = UUID.fromString(key);
+            if (!(rawEntry instanceof Map<?, ?> raw) || !(raw.get("location") instanceof Map<?, ?> loc)) {
+                return Resolution.INVALID;
+            }
+            Object linkedRaw = raw.get("linked");
+            UUID linkedId = linkedRaw == null ? null : UUID.fromString(String.valueOf(linkedRaw));
+            World world = worldOf(loc);
+            if (world == null) return Resolution.WORLD_MISSING;
+            Location location = new Location(world, NumberConversions.toDouble(loc.get("x")),
+                NumberConversions.toDouble(loc.get("y")), NumberConversions.toDouble(loc.get("z")),
+                NumberConversions.toFloat(loc.get("yaw")), NumberConversions.toFloat(loc.get("pitch")));
+            boolean islandOnly = raw.get("islandOnly") instanceof Boolean b && b;
+            AnchorOrientation orientation;
+            try {
+                orientation = AnchorOrientation.valueOf(String.valueOf(raw.get("orientation") == null ? "DEFAULT" : raw.get("orientation")));
+            } catch (IllegalArgumentException e) {
+                orientation = AnchorOrientation.DEFAULT;
+            }
+            TeleportAnchor anchor = new TeleportAnchor(id, location, islandOnly, orientation);
+            anchors.put(id, anchor);
+            addAnchorToChunkMap(anchor);
+            if (linkedId != null) {
+                linkedAnchors.put(id, linkedId);
+            }
+            return Resolution.OK;
+        } catch (RuntimeException e) {
+            return Resolution.INVALID;
+        }
+    }
+
+    /**
+     * Appelé quand un monde se charge : les ancres en attente dans ce monde deviennent actives.
+     */
+    public void resolvePendingAnchors() {
+        if (pendingAnchors.isEmpty()) return;
+        int resolved = 0;
+        for (Iterator<Map.Entry<String, Object>> it = pendingAnchors.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<String, Object> entry = it.next();
+            if (resolveAnchor(entry.getKey(), entry.getValue()) == Resolution.OK) {
+                it.remove();
+                resolved++;
+            }
+        }
+        if (resolved > 0) {
+            getLogger().info(resolved + " ancre(s) en attente activée(s) avec le chargement de leur monde.");
         }
     }
 
     private void saveAnchors() {
+        if (!anchorsLoaded) return;
         YamlConfiguration yaml = new YamlConfiguration();
         for (Map.Entry<UUID, TeleportAnchor> entry : anchors.entrySet()) {
             String key = entry.getKey().toString();
@@ -320,35 +403,30 @@ public class SHAnchors extends JavaPlugin {
                 yaml.set(key + ".linked", linkedId.toString());
             }
         }
+        pendingAnchors.forEach(yaml::set);
+        // Fichier temporaire puis remplacement : un arrêt pendant l'écriture ne laisse pas un anchors.yml tronqué
+        File target = new File(getDataFolder(), "anchors.yml");
+        File temp = new File(getDataFolder(), "anchors.yml.tmp");
         try {
-            yaml.save(new File(getDataFolder(), "anchors.yml"));
+            yaml.save(temp);
+            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
             getLogger().severe("Impossible de sauvegarder les ancres dans anchors.yml: " + e.getMessage());
         }
     }
 
-    private void cleanupInvalidAnchors() {
-        new ArrayList<>(anchors.values()).forEach(anchor -> {
-            if (anchor.getLocation().getBlock().getType() != Material.RESPAWN_ANCHOR) {
-                cleanupInvalidAnchor(anchor);
-            }
-        });
-    }
-
+    /**
+     * Retire les ancres dont le bloc a disparu. Seuls les chunks chargés sont examinés : ne charge aucun chunk.
+     */
     private void cleanupOrphanedAnchorsLightweight() {
         int cleanedCount = 0;
-        for (World world : Bukkit.getWorlds()) {
-            for (Chunk chunk : world.getLoadedChunks()) {
-                Set<UUID> chunkAnchors = anchorsByChunk.get(chunk);
-                if (chunkAnchors != null) {
-                    for (UUID anchorId : new HashSet<>(chunkAnchors)) {
-                        TeleportAnchor anchor = anchors.get(anchorId);
-                        if (anchor != null && anchor.getLocation().getBlock().getType() != Material.RESPAWN_ANCHOR) {
-                            cleanupInvalidAnchor(anchor);
-                            cleanedCount++;
-                        }
-                    }
-                }
+        for (TeleportAnchor anchor : new ArrayList<>(anchors.values())) {
+            Location loc = anchor.getLocation();
+            World world = loc.getWorld();
+            if (world == null || !world.isChunkLoaded(loc.getBlockX() >> 4, loc.getBlockZ() >> 4)) continue;
+            if (loc.getBlock().getType() != Material.RESPAWN_ANCHOR) {
+                cleanupInvalidAnchor(anchor);
+                cleanedCount++;
             }
         }
         if (cleanedCount > 0) {
@@ -356,11 +434,29 @@ public class SHAnchors extends JavaPlugin {
         }
     }
 
+    /**
+     * Son lu en config : ancien nom (ENTITY_PLAYER_LEVELUP) ou clé (minecraft:entity.player.levelup).
+     */
+    static Sound sound(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String s = raw.trim();
+        if (s.indexOf(':') >= 0 || s.indexOf('.') >= 0) {
+            NamespacedKey key = NamespacedKey.fromString(s.toLowerCase(Locale.ROOT));
+            return key == null ? null : Registry.SOUND_EVENT.get(key);
+        }
+        try {
+            return (Sound) Sound.class.getField(s.toUpperCase(Locale.ROOT)).get(null);
+        } catch (ReflectiveOperationException | ClassCastException e) {
+            return null;
+        }
+    }
+
     public void playSound(Player player, String configKey) {
         ConfigurationSection sec = config.getConfigurationSection(configKey);
         if (sec == null) return;
         try {
-            Sound sound = Sound.valueOf(sec.getString("sound").toUpperCase());
+            Sound sound = sound(sec.getString("sound"));
+            if (sound == null) throw new IllegalArgumentException(sec.getString("sound"));
             float volume = (float) sec.getDouble("volume", 1.0);
             float pitch = (float) sec.getDouble("pitch", 1.0);
             player.playSound(player.getLocation(), sound, volume, pitch);
@@ -433,6 +529,17 @@ class AnchorListener implements Listener {
 
     public AnchorListener(SHAnchors plugin) {
         this.plugin = plugin;
+    }
+
+    @EventHandler
+    public void onWorldLoad(WorldLoadEvent event) {
+        plugin.resolvePendingAnchors();
+    }
+
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        plugin.getTeleportCooldown().remove(event.getPlayer().getUniqueId());
+        plugin.getAnchorSelectionMode().remove(event.getPlayer().getUniqueId());
     }
 
     @EventHandler(priority = EventPriority.HIGH)
@@ -540,7 +647,10 @@ class AnchorListener implements Listener {
 
         TeleportAnchor destAnchor = plugin.getAnchors().get(linkedId);
         if (destAnchor == null) {
-            plugin.getLinkedAnchors().remove(originAnchor.getId());
+            // Destination dans un monde pas encore chargé : on garde la liaison
+            if (!plugin.isPendingAnchor(linkedId)) {
+                plugin.getLinkedAnchors().remove(originAnchor.getId());
+            }
             return;
         }
 
@@ -586,12 +696,8 @@ class AnchorListener implements Listener {
     @EventHandler
     public void onInventoryClick(InventoryClickEvent event) {
         FileConfiguration config = plugin.getPluginConfig();
-        String guiTitle = ChatColor.translateAlternateColorCodes('&', config.getString("gui.title", "&8Gestion de l'Ancre"));
-        if (!event.getView().getTitle().equals(guiTitle)) return;
+        if (!(event.getInventory().getHolder() instanceof AnchorInventoryHolder holder)) return;
         event.setCancelled(true);
-        if (!(event.getInventory().getHolder() instanceof AnchorInventoryHolder)) return;
-
-        AnchorInventoryHolder holder = (AnchorInventoryHolder) event.getInventory().getHolder();
         TeleportAnchor guiAnchor = holder.getAnchor();
         if (!(event.getWhoClicked() instanceof Player)) return;
 
@@ -646,6 +752,14 @@ class AnchorListener implements Listener {
     }
 
     @EventHandler
+    public void onInventoryDrag(InventoryDragEvent event) {
+        // Glisser des objets sur le menu les y laisserait : ils disparaîtraient à la fermeture
+        if (event.getInventory().getHolder() instanceof AnchorInventoryHolder) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
     public void onBlockBreak(BlockBreakEvent event) {
         if (event.isCancelled()) return;
         Block block = event.getBlock();
@@ -674,6 +788,12 @@ class AnchorListener implements Listener {
             world.spawnParticle(Particle.PORTAL, location.clone().add(0, 0.5, 0), 50, 0.5, 0.5, 0.5, 0.5);
             world.playSound(location, Sound.ENTITY_ENDERMAN_TELEPORT, 1.0f, 1.2f);
         }
+    }
+}
+
+record ChunkKey(UUID world, int x, int z) {
+    static ChunkKey of(Location location) {
+        return new ChunkKey(location.getWorld().getUID(), location.getBlockX() >> 4, location.getBlockZ() >> 4);
     }
 }
 
